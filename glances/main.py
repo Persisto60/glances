@@ -217,6 +217,16 @@ Examples of use:
             dest='enable_plugin',
             help='enable plugin (comma-separated list)',
         )
+#pb 20250703
+#added
+        parser.add_argument(
+            '--disable-useridle', 
+            action='store_true', 
+            default=False, 
+            dest='disable_useridle', 
+            help='disable useridle module')
+#end pb 20250703
+
         parser.add_argument(
             '--disable-process',
             action='store_true',
@@ -224,6 +234,9 @@ Examples of use:
             dest='disable_process',
             help='disable process module',
         )
+
+
+
         # Enable or disable option
         parser.add_argument(
             '--disable-webui',

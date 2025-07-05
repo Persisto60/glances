@@ -1,4 +1,7 @@
 <template>
+
+<!  for testing only: replaced 9 occurences of useridle with useridle  -->
+
     <div v-if="!dataLoaded" id="loading-page" class="container-fluid">
         <div class="loader">Glances is loading...</div>
     </div>
@@ -8,7 +11,7 @@
         <div class="d-sm-none">
             <div class="header-small">
                 <div v-if="!args.disable_system"><glances-plugin-hostname :data="data"></glances-plugin-hostname></div>
-                <div v-if="!args.disable_uptime"><glances-plugin-uptime :data="data"></glances-plugin-uptime></div>
+                <div v-if="!args.disable_useridle"><glances-plugin-useridle :data="data"></glances-plugin-useridle></div>
             </div>
         </div>
         <!-- Display standard header on others screen sizes -->
@@ -21,8 +24,8 @@
                 </div>
                 <div v-if="!args.disable_now" class="d-none d-xl-block"><glances-plugin-now
                         :data="data"></glances-plugin-now></div>
-                <div v-if="!args.disable_uptime" class="d-none d-md-block"><glances-plugin-uptime
-                        :data="data"></glances-plugin-uptime></div>
+                <div v-if="!args.disable_useridle" class="d-none d-md-block"><glances-plugin-useridle
+                        :data="data"></glances-plugin-useridle></div>
             </div>
         </div>
         <div class="d-flex d-none d-sm-block">
@@ -120,9 +123,10 @@ import GlancesPluginRaid from './components/plugin-raid.vue';
 import GlancesPluginSmart from './components/plugin-smart.vue';
 import GlancesPluginSensors from './components/plugin-sensors.vue';
 import GlancesPluginSystem from './components/plugin-system.vue';
-import GlancesPluginUptime from './components/plugin-uptime.vue';
+import GlancesPluginuseridle from './components/plugin-useridle.vue';
 import GlancesPluginVms from './components/plugin-vms.vue';
 import GlancesPluginWifi from './components/plugin-wifi.vue';
+import GlancesPluginFoo from './components/plugin-foo.vue';
 
 import uiconfig from './uiconfig.json';
 
@@ -154,7 +158,7 @@ export default {
         GlancesPluginSensors,
         GlancesPluginSmart,
         GlancesPluginSystem,
-        GlancesPluginUptime,
+        GlancesPluginuseridle,
         GlancesPluginVms,
         GlancesPluginWifi
     },

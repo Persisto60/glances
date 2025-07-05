@@ -509,7 +509,7 @@ class _GlancesCurses:
         """Display stats on the screen.
 
         :param stats: Stats database to display
-        :param cs_status:
+        :param cs_status:stat_displa
             "None": standalone or server mode
             "Connected": Client is connected to a Glances server
             "SNMP": Client is connected to a SNMP server
@@ -649,6 +649,9 @@ class _GlancesCurses:
                     logger.info(f'Kill signal has been sent to process {pid} (return code: {ret_kill})')
 
     def __display_header(self, stat_display):
+
+#PB 20250703 start modified block
+
         """Display the firsts lines (header) in the Curses interface.
 
         system + ip + uptime
@@ -674,6 +677,40 @@ class _GlancesCurses:
             # Second line (optional)
             self.new_line()
             self.display_plugin(stat_display["cloud"])
+
+
+#PB 20250703 end modified block
+
+#PB 20250703 start comment copy of original 
+
+        """Display the firsts lines (header) in the Curses interface.
+
+        # system + ip + uptime
+        # (cloud)
+        # """
+        # # First line
+        # self.new_line()
+        # self.space_between_column = 0
+        # l_uptime = 1
+        # for i in ['system', 'ip', 'uptime']:
+        #     if i in stat_display:
+        #         l_uptime += self.get_stats_display_width(stat_display[i])
+        # self.display_plugin(stat_display["system"], display_optional=(self.term_window.getmaxyx()[1] >= l_uptime))
+        # self.space_between_column = 3
+        # if 'ip' in stat_display:
+        #     self.new_column()
+        #     self.display_plugin(stat_display["ip"], display_optional=(self.term_window.getmaxyx()[1] >= 100))
+        # self.new_column()
+        # cloud_width = self.get_stats_display_width(stat_display.get("cloud", 0))
+        # self.display_plugin(stat_display["uptime"], add_space=-(cloud_width != 0))
+        # self.init_column()
+        # if cloud_width != 0:
+        #     # Second line (optional)
+        #     self.new_line()
+        #     self.display_plugin(stat_display["cloud"])
+
+#PB 20250703 end comment copy of original 
+
 
     def __display_top(self, stat_display, stats):
         """Display the second line in the Curses interface.
