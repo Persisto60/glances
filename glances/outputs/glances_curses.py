@@ -5,6 +5,8 @@
 #
 # SPDX-License-Identifier: LGPL-3.0-only
 #
+# 20250711 PB line 675 - 689 to display output of useridle plugin
+#
 
 """Curses interface class."""
 
@@ -670,13 +672,28 @@ class _GlancesCurses:
             self.display_plugin(stat_display["ip"], display_optional=(self.term_window.getmaxyx()[1] >= 100))
         self.new_column()
         cloud_width = self.get_stats_display_width(stat_display.get("cloud", 0))
-        self.display_plugin(stat_display["uptime"], add_space=-(cloud_width != 0))
+        self.display_plugin(stat_display["uptime"], add_space=-(cloud_width != 0)) 
+
+        # 20250711 PB added to display useridle to the left of uptime.
+        # this mod is the only one -apart from the useridle plugin itself- to show UI idle time on the curses display-
+        # This is intentionally kept simple as I am not able to judge or test all intentions of this code.
+        useridle_stats = stat_display['useridle']
+        # Temporarily set align to 'left' so the display uses our custom column
+        useridle_stats['align'] = 'left'
+        # Calculate the starting column position to the left of uptime
+        uptime_width = self.get_stats_display_width(stat_display['uptime'])
+        col_useridle = self.term_window.getmaxyx()[1] - uptime_width - self.get_stats_display_width(useridle_stats) - self.space_between_column
+        self.column = col_useridle
+        # Display the plugin at the new position
+        self.display_plugin(useridle_stats)
+        # 20250711 PB end added
+
         self.init_column()
         if cloud_width != 0:
             # Second line (optional)
             self.new_line()
             self.display_plugin(stat_display["cloud"])
-
+            
     def __display_top(self, stat_display, stats):
         """Display the second line in the Curses interface.
 
