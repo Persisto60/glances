@@ -676,7 +676,7 @@ class _GlancesCurses:
 
         # 20250711 PB added to display useridle to the left of uptime.
         # this mod is the only one -apart from the useridle plugin itself- to show UI idle time on the curses display-
-        # This is intentionally kept simple as I am not able to judge or test all intentions of this code.
+        # This is intentionally kept simple as I am not able to judge or test all intentions of glances_curses.py code.
         useridle_stats = stat_display['useridle']
         # Temporarily set align to 'left' so the display uses our custom column
         useridle_stats['align'] = 'left'

@@ -8,6 +8,7 @@
         <div class="d-sm-none">
             <div class="header-small">
                 <div v-if="!args.disable_system"><glances-plugin-hostname :data="data"></glances-plugin-hostname></div>
+                <div v-if="!args.disable_useridle"><glances-plugin-useridle :data="data"></glances-plugin-useridle></div>                
                 <div v-if="!args.disable_uptime"><glances-plugin-uptime :data="data"></glances-plugin-uptime></div>
             </div>
         </div>
@@ -21,6 +22,8 @@
                 </div>
                 <div v-if="!args.disable_now" class="d-none d-xl-block"><glances-plugin-now
                         :data="data"></glances-plugin-now></div>
+                <div v-if="!args.disable_useridle" class="d-none d-md-block"><glances-plugin-useridle
+                    :data="data"></glances-plugin-useridle></div>
                 <div v-if="!args.disable_uptime" class="d-none d-md-block"><glances-plugin-uptime
                         :data="data"></glances-plugin-uptime></div>
             </div>
@@ -121,6 +124,7 @@ import GlancesPluginSmart from './components/plugin-smart.vue';
 import GlancesPluginSensors from './components/plugin-sensors.vue';
 import GlancesPluginSystem from './components/plugin-system.vue';
 import GlancesPluginUptime from './components/plugin-uptime.vue';
+import GlancesPluginUseridle from './components/plugin-useridle.vue';
 import GlancesPluginVms from './components/plugin-vms.vue';
 import GlancesPluginWifi from './components/plugin-wifi.vue';
 
@@ -155,6 +159,7 @@ export default {
         GlancesPluginSmart,
         GlancesPluginSystem,
         GlancesPluginUptime,
+        GlancesPluginUseridle,
         GlancesPluginVms,
         GlancesPluginWifi
     },
