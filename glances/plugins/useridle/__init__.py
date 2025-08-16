@@ -1,20 +1,20 @@
 # useridle
-
 #
 # This file is part of Glances.
 #
 # written by Pete BOS and friends (Gemini, Claude and Chatgpt)
 #
 # intended to detect user inactivity of personal computers in order to switch them off/ make them go to sleep. (With Home Assistant)
-# has been tested with Windows and Linux (Debian with xTerm) requires  xprintfile  sudo apt install xprintidle
+# has been tested with Windows and Linux (Debian with xTerm) requires xprintfile sudo apt install xprintidle
 
 import ctypes
+import os
 import platform
-import sys
-from datetime import datetime, timedelta
 import subprocess
 import shutil
-
+import sys
+from datetime import datetime, timedelta
+import time
 
 # Corrected import path for GlancesPluginModel and logger
 from glances.plugins.plugin.model import GlancesPluginModel
@@ -36,12 +36,14 @@ if sys.platform.startswith('win'):
         return None  # Return None on error
 
 
-# --- Linux (xprintidle)-specific API ---
+# --- Linux-specific API ---
 elif sys.platform.startswith('linux'):
     _XPRINTIDLE_AVAILABLE = False
     _XPRINTIDLE_CHECKED = False
+    _BOOT_TIME = datetime.now() - timedelta(seconds=time.clock_gettime(time.CLOCK_BOOTTIME))
 
     def _check_xprintidle_availability():
+        """Checks and caches if xprintidle is installed."""
         global _XPRINTIDLE_AVAILABLE, _XPRINTIDLE_CHECKED
         if not _XPRINTIDLE_CHECKED:
             _XPRINTIDLE_AVAILABLE = shutil.which('xprintidle') is not None
@@ -52,13 +54,25 @@ elif sys.platform.startswith('linux'):
         return _XPRINTIDLE_AVAILABLE
 
     def _get_linux_idle_time():
+        """
+        Gets idle time. Returns time since boot if no Xorg session is detected,
+        otherwise uses xprintidle.
+        """
+        # Check if an Xorg session is active
+        if 'DISPLAY' not in os.environ:
+            # No Xorg session, return time since boot
+            idle_seconds = (datetime.now() - _BOOT_TIME).total_seconds()
+            logger.debug(f"useridle: No Xorg session detected. Reporting time since boot: {int(idle_seconds)}s")
+            return idle_seconds
+        
+        # An Xorg session is active, try to use xprintidle
         if not _check_xprintidle_availability():
             logger.debug(
                 "useridle: xprintidle not available, skipping idle time check.")
             return None
 
         try:
-            # Run xprintidle and get the result
+            # Run xprintidle to get the result
             result = subprocess.run(['xprintidle'],
                                     capture_output=True,
                                     text=True,
@@ -67,6 +81,7 @@ elif sys.platform.startswith('linux'):
             if result.returncode == 0:
                 # xprintidle returns milliseconds
                 idle_ms = int(result.stdout.strip())
+                logger.debug(f"useridle: Xorg session active. Reporting xprintidle time: {idle_ms/1000.0}s")
                 return idle_ms / 1000.0
             else:
                 logger.debug(
@@ -102,6 +117,7 @@ class PluginModel(GlancesPluginModel):
 
     def __init__(self, args=None, config=None):
         super().__init__(args=args, config=config)
+        logger.debug("useridle: useridle loaded).")
 
         self.display_curse = True
         self.align = 'right'
@@ -118,12 +134,9 @@ class PluginModel(GlancesPluginModel):
                 self.set_disabled()
 
         elif self.platform.startswith('linux'):
-            # Check xprintidle availability during initialization
-            if not _check_xprintidle_availability():
-                self.disabled_msg = "xprintidle command not found."
-                self.set_disabled()
-            else:
-                self.disabled_msg = None
+            # On Linux, plugin is always active to report either boot time or xprintidle
+            self.disabled_msg = None
+            
         else:  # Unsupported OS
             self.disabled_msg = "Unsupported OS."
             self.set_disabled()
@@ -161,7 +174,7 @@ class PluginModel(GlancesPluginModel):
         if self.platform.startswith('win'):
             idle_time_s = _get_windows_idle_time()
         elif self.platform.startswith('linux'):
-            idle_time_s = _get_linux_idle_time()  # Call the new xprintidle function
+            idle_time_s = _get_linux_idle_time()
 
         if idle_time_s is not None:
             self.idle_seconds = idle_time_s
@@ -185,20 +198,12 @@ class PluginModel(GlancesPluginModel):
             self.idle_seconds = 0.0
             self.idle_timedelta = timedelta(seconds=0)
             self.stats = "N/A"  # Indicate no data / error
-
-            if self.platform.startswith('linux') and not _check_xprintidle_availability():
-                logger.debug(
-                    "useridle: Cannot get idle time. xprintidle not installed.")
-            elif self.platform.startswith('linux') and idle_time_s is None:
-                logger.debug(
-                    "useridle: Cannot get idle time (xprintidle issue, see prior warnings).")
-            elif self.platform.startswith('win') and idle_time_s is None:
-                logger.debug(
-                    "useridle: Cannot get idle time (Windows API error).")
+            
+            if self.platform.startswith('win') and idle_time_s is None:
+                logger.debug("useridle: Cannot get idle time (Windows API error).")
             else:
                 # General error message
-                logger.error(
-                    "useridle: Could not retrieve idle time. Displaying 'N/A'.")
+                logger.error("useridle: Could not retrieve idle time. Displaying 'N/A'.")
 
         return self.stats
 
@@ -223,7 +228,7 @@ class PluginModel(GlancesPluginModel):
             # Returning an empty list makes it consistent with disabled state for width calculation.
             return ret  # Returning empty list for "N/A" too, to ensure width is 0 if not active
 
-        return [self.curse_add_line(f"UI Idle: {self.stats}")]
+        return [self.curse_add_line(f"UI IDLE: {self.stats}")]
 
     def get_name(self):
         return "useridle"
