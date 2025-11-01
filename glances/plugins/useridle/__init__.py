@@ -26,15 +26,48 @@ if sys.platform.startswith('win'):
     class LASTINPUTINFO(ctypes.Structure):
         _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
 
+    # def _get_windows_idle_time():
+    #     last_input = LASTINPUTINFO()
+    #     last_input.cbSize = ctypes.sizeof(last_input)
+    #     if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(last_input)):
+    #         current_tick_count = ctypes.windll.kernel32.GetTickCount()
+    #         idle_millis = current_tick_count - last_input.dwTime
+    #         return idle_millis / 1000.0
+    #     return None  # Return None on error
+
+
     def _get_windows_idle_time():
+        """
+        Gets idle time. Returns time since boot if no user session is detected,
+        otherwise uses GetLastInputInfo.
+        """
+        try:
+            # Check the current session ID
+            current_session_id = ctypes.windll.kernel32.WTSGetActiveConsoleSessionId()
+        except AttributeError:
+            # Fallback if WTSGetActiveConsoleSessionId is not available (e.g., older OS)
+            current_session_id = None
+        
+        # If the current session is not an interactive console session (i.e., it's a service session)
+        if current_session_id == 0xFFFFFFFF or current_session_id == 0:
+            # No interactive user session, return time since boot
+            current_tick_count = ctypes.windll.kernel32.GetTickCount64() if hasattr(ctypes.windll.kernel32, 'GetTickCount64') else ctypes.windll.kernel32.GetTickCount()
+            boot_time = datetime.now() - timedelta(milliseconds=current_tick_count)
+            idle_seconds = (datetime.now() - boot_time).total_seconds()
+            logger.debug(f"useridle: No interactive user session detected. Reporting time since boot: {int(idle_seconds)}s")
+            return idle_seconds
+        
+        # An interactive session is active, use GetLastInputInfo
         last_input = LASTINPUTINFO()
         last_input.cbSize = ctypes.sizeof(last_input)
         if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(last_input)):
-            current_tick_count = ctypes.windll.kernel32.GetTickCount()
+            current_tick_count = ctypes.windll.kernel32.GetTickCount64() if hasattr(ctypes.windll.kernel32, 'GetTickCount64') else ctypes.windll.kernel32.GetTickCount()
             idle_millis = current_tick_count - last_input.dwTime
+            logger.debug(f"useridle: Interactive session active. Reporting GetLastInputInfo time: {idle_millis/1000.0}s")
             return idle_millis / 1000.0
-        return None  # Return None on error
-
+        
+        logger.error("useridle: GetLastInputInfo failed.")
+        return None # Return None on error
 
 # --- Linux-specific API ---
 elif sys.platform.startswith('linux'):
