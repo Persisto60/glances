@@ -88,69 +88,75 @@ elif sys.platform.startswith('linux'):
 
     def _get_linux_idle_time():
         """
-        Gets idle time. Returns time since boot if no Xorg session is detected,
+        Gets idle time. Returns time since boot if no valid Xorg session is detected,
         otherwise uses xprintidle.
         """
-        # Check if an Xorg session is active
-        if 'DISPLAY' not in os.environ:
-            # No Xorg session, return time since boot
+        # Check if an Xorg session is active by verifying DISPLAY and its validity
+        if 'DISPLAY' not in os.environ or not os.environ['DISPLAY']:
+            # No Xorg session or DISPLAY is empty, return time since boot
             idle_seconds = (datetime.now() - _BOOT_TIME).total_seconds()
-            logger.debug(f"useridle: No Xorg session detected. Reporting time since boot: {int(idle_seconds)}s")
+            logger.debug(f"useridle: No valid Xorg session detected (DISPLAY not set or empty). Reporting time since boot: {int(idle_seconds)}s")
             return idle_seconds
-        
-        # An Xorg session is active, try to use xprintidle
+
+        # Check if xprintidle is available
         if not _check_xprintidle_availability():
-            logger.debug(
-                "useridle: xprintidle not available, skipping idle time check.")
-            return None
+            logger.debug("useridle: xprintidle not available, falling back to boot time.")
+            idle_seconds = (datetime.now() - _BOOT_TIME).total_seconds()
+            logger.debug(f"useridle: xprintidle not available. Reporting time since boot: {int(idle_seconds)}s")
+            return idle_seconds
 
+        # Try to verify if the DISPLAY is valid by running a simple X command
         try:
-            # Run xprintidle to get the result
-            result = subprocess.run(['xprintidle'],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=5)
+            # Use xset as a lightweight check for a valid X session
+            subprocess.run(['xset', 'q'], capture_output=True, text=True, timeout=2, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            # DISPLAY is set but invalid, fall back to boot time
+            idle_seconds = (datetime.now() - _BOOT_TIME).total_seconds()
+            logger.debug(f"useridle: Invalid Xorg session (DISPLAY={os.environ.get('DISPLAY')}). Reporting time since boot: {int(idle_seconds)}s")
+            return idle_seconds
 
-            if result.returncode == 0:
-                # xprintidle returns milliseconds
-                idle_ms = int(result.stdout.strip())
-                logger.debug(f"useridle: Xorg session active. Reporting xprintidle time: {idle_ms/1000.0}s")
-                return idle_ms / 1000.0
-            else:
-                logger.debug(
-                    f"useridle: xprintidle failed with return code {result.returncode}. Error: {result.stderr.strip()}")
-                return None
-
+        # Valid Xorg session, try to use xprintidle
+        try:
+            result = subprocess.run(['xprintidle'], capture_output=True, text=True, timeout=5, check=True)
+            idle_ms = int(result.stdout.strip())
+            logger.debug(f"useridle: Valid Xorg session active. Reporting xprintidle time: {idle_ms/1000.0}s")
+            return idle_ms / 1000.0
+        except subprocess.CalledProcessError as e:
+            logger.debug(f"useridle: xprintidle failed with return code {e.returncode}. Error: {e.stderr.strip()}")
+            # Fall back to boot time if xprintidle fails
+            idle_seconds = (datetime.now() - _BOOT_TIME).total_seconds()
+            logger.debug(f"useridle: xprintidle failed, falling back to boot time: {int(idle_seconds)}s")
+            return idle_seconds
         except FileNotFoundError:
-            logger.warning(
-                "useridle: xprintidle command not found. This should have been caught by initial check.")
+            logger.warning("useridle: xprintidle command not found. This should have been caught by initial check.")
             return None
         except subprocess.TimeoutExpired:
             logger.debug("useridle: xprintidle command timed out.")
             return None
         except ValueError:
-            logger.error(
-                f"useridle: Could not parse xprintidle output: '{result.stdout.strip()}' is not a valid number.")
+            logger.error(f"useridle: Could not parse xprintidle output: '{result.stdout.strip()}' is not a valid number.")
             return None
         except Exception as e:
-            logger.error(
-                f"useridle: An unexpected error occurred while running xprintidle: {e}", exc_info=False)
-            return None
+            logger.error(f"useridle: An unexpected error occurred while running xprintidle: {e}", exc_info=False)
+            return None        
+        
 else:  # Other operating systems (macOS, BSD, etc.)
     _get_windows_idle_time = None  # Mark as unavailable
     _get_linux_idle_time = None  # Mark as unavailable
 
 
 # --- Glances Plugin Model ---
-class PluginModel(GlancesPluginModel):
     """
     Glances plugin to detect user idle time.
     Supports Windows (via GetLastInputInfo) and Linux (via xprintidle).
     """
-
+# GROK sugestion 20251103: replace following with line below:
+#  #class PluginModel(GlancesPluginModel):
+class UseridlePlugin(GlancesPluginModel):
+    """Glances plugin to display user idle time."""
     def __init__(self, args=None, config=None):
         super().__init__(args=args, config=config)
-        logger.debug("useridle: useridle loaded).")
+        logger.debug("useridle: Plugin loaded.")
 
         self.display_curse = True
         self.align = 'right'
