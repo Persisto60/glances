@@ -199,7 +199,7 @@ class PluginModel(GlancesPluginModel):
         Update the plugin data.
         """
         if self.is_disabled():
-            self.stats = self.disabled_msg or "N/A"  # Display disabled message
+            self.stats = self.disabled_msg or "N/A"
             return self.stats
 
         idle_time_s = None
@@ -207,8 +207,11 @@ class PluginModel(GlancesPluginModel):
         if self.platform.startswith('win'):
             idle_time_s = _get_windows_idle_time()
         elif self.platform.startswith('linux'):
+            # The Linux function returns time since boot if no X session is found,
+            # or xprintidle result, or None on specific errors.
             idle_time_s = _get_linux_idle_time()
 
+        # --- This block processes valid idle time data (including time since boot on Linux) ---
         if idle_time_s is not None:
             self.idle_seconds = idle_time_s
             self.idle_timedelta = timedelta(seconds=int(self.idle_seconds))
@@ -227,6 +230,7 @@ class PluginModel(GlancesPluginModel):
             else:
                 self.stats = f"{hours:02}:{minutes:02}:{seconds:02}"
 
+        # --- This block handles actual errors (where idle_time_s is None) ---
         else:
             self.idle_seconds = 0.0
             self.idle_timedelta = timedelta(seconds=0)
@@ -235,7 +239,7 @@ class PluginModel(GlancesPluginModel):
             if self.platform.startswith('win') and idle_time_s is None:
                 logger.debug("useridle: Cannot get idle time (Windows API error).")
             else:
-                # General error message
+                # General error message (This will catch xprintidle failures)
                 logger.error("useridle: Could not retrieve idle time. Displaying 'N/A'.")
 
         return self.stats
