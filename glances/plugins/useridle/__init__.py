@@ -152,7 +152,7 @@ class UseridlePlugin(GlancesPluginModel):
     """Glances plugin to display user idle time."""
     def __init__(self, args=None, config=None):
         super().__init__(args=args, config=config)
-        logger.debug("useridle: Plugin loaded.")
+        logger.debug("useridle: V20251103_19h30 Plugin loaded.")
 
         self.display_curse = True
         self.align = 'right'
