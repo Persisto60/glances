@@ -1,5 +1,4 @@
-# useridle last mod: 04/11/2025 18h45
-#
+# useridle last mod: 04/11/2025 22h45 Claud's solution
 # This file is part of Glances.
 #
 # written by Pete BOS and friends (Gemini and Grok)
@@ -30,21 +29,31 @@ if sys.platform.startswith('win'):
 
     # ---- Windows constants ------------------------------------------------
     WTS_CURRENT_SERVER_HANDLE = 0
-    WTS_CURRENT_SESSION       = -1
     DESKTOP_SWITCHDESKTOP     = 0x0100
-    WTS_CONNECTSTATE          = 13          # WTSConnectState enum index
+    WTS_CONNECTSTATE_CLASS    = 8           # WTSConnectState enum index
+    
+    # Connection states
+    WTSActive      = 0
+    WTSConnected   = 1
+    WTSDisconnected = 4
 
     # ---- WinAPI prototypes ------------------------------------------------
-    WTSQuerySessionInformation = ctypes.windll.wtsapi32.WTSQuerySessionInformationW
-    WTSFreeMemory             = ctypes.windll.wtsapi32.WTSFreeMemory
-    OpenInputDesktop          = ctypes.windll.user32.OpenInputDesktop
-    CloseDesktop              = ctypes.windll.user32.CloseDesktop
-    GetLastInputInfo          = ctypes.windll.user32.GetLastInputInfo
-    GetTickCount64            = getattr(ctypes.windll.kernel32, 'GetTickCount64', None)
-    GetTickCount              = ctypes.windll.kernel32.GetTickCount
+    WTSEnumerateSessionsW = ctypes.windll.wtsapi32.WTSEnumerateSessionsW
+    WTSQuerySessionInformationW = ctypes.windll.wtsapi32.WTSQuerySessionInformationW
+    WTSFreeMemory = ctypes.windll.wtsapi32.WTSFreeMemory
+    GetLastInputInfo = ctypes.windll.user32.GetLastInputInfo
+    GetTickCount64 = getattr(ctypes.windll.kernel32, 'GetTickCount64', None)
+    GetTickCount = ctypes.windll.kernel32.GetTickCount
 
     class LASTINPUTINFO(ctypes.Structure):
         _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
+
+    class WTS_SESSION_INFO(ctypes.Structure):
+        _fields_ = [
+            ('SessionId', wintypes.DWORD),
+            ('pWinStationName', wintypes.LPWSTR),
+            ('State', ctypes.c_int)
+        ]
 
     # ------------------------------------------------------------------
     def _time_since_boot() -> float:
@@ -53,51 +62,80 @@ if sys.platform.startswith('win'):
         return tick / 1000.0
 
     # ------------------------------------------------------------------
+    def _get_console_session_id() -> int | None:
+        """Find the active console session ID."""
+        p_session_info = ctypes.POINTER(WTS_SESSION_INFO)()
+        count = wintypes.DWORD()
+        
+        if not WTSEnumerateSessionsW(
+            WTS_CURRENT_SERVER_HANDLE,
+            0,  # Reserved
+            1,  # Version
+            ctypes.byref(p_session_info),
+            ctypes.byref(count)
+        ):
+            logger.debug("useridle: WTSEnumerateSessions failed")
+            return None
+        
+        try:
+            sessions = ctypes.cast(
+                p_session_info,
+                ctypes.POINTER(WTS_SESSION_INFO * count.value)
+            ).contents
+            
+            for session in sessions:
+                # Look for Console session that is Active or Connected
+                if session.pWinStationName and 'Console' in session.pWinStationName:
+                    if session.State in (WTSActive, WTSConnected):
+                        logger.debug(f"useridle: Found active console session {session.SessionId}")
+                        return session.SessionId
+        finally:
+            WTSFreeMemory(p_session_info)
+        
+        logger.debug("useridle: No active console session found")
+        return None
+
+    # ------------------------------------------------------------------
     def _get_windows_idle_time() -> float | None:
         """
         Return *real* user-idle seconds for the interactive console session.
         Works when Glances is installed as a Windows service.
         """
-        # 1. Verify that an interactive console session exists
+        # Find the active console session
+        session_id = _get_console_session_id()
+        
+        if session_id is None:
+            logger.debug("useridle: No interactive session – reporting time since boot")
+            return _time_since_boot()
+        
+        # Query session information to verify it's connected
         p_info = ctypes.c_void_p()
         bytes_ret = wintypes.DWORD()
-        ok = WTSQuerySessionInformation(
+        ok = WTSQuerySessionInformationW(
             WTS_CURRENT_SERVER_HANDLE,
-            WTS_CURRENT_SESSION,
-            WTS_CONNECTSTATE,
+            session_id,
+            WTS_CONNECTSTATE_CLASS,
             ctypes.byref(p_info),
             ctypes.byref(bytes_ret)
         )
+        
         if ok:
-            WTSFreeMemory(p_info)          # we only needed the call to succeed
+            WTSFreeMemory(p_info)
         else:
-            logger.debug("useridle: WTSQuerySessionInformation failed – no console session.")
+            logger.debug(f"useridle: Failed to query session {session_id}")
             return _time_since_boot()
-
-        # 2. Try to open the *input* desktop of the console session
-        hDesk = OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
-        if not hDesk:
-            logger.debug("useridle: OpenInputDesktop failed – no logged-on user.")
-            return _time_since_boot()
-
-        try:
-            lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
-            if GetLastInputInfo(ctypes.byref(lii)):
-                tick = GetTickCount64() if GetTickCount64 else GetTickCount()
-                idle_ms = tick - lii.dwTime
-                idle_sec = idle_ms / 1000.0
-                logger.debug(f"useridle: real idle time = {idle_sec:.1f}s")
-                return idle_sec
-            else:
-                logger.debug("useridle: GetLastInputInfo failed after opening desktop.")
-        finally:
-            CloseDesktop(hDesk)
-
-        # Fallback (should never be reached)
-        return _time_since_boot()
-
-
-# ----------------------------------------------------------------------
+        
+        # Get last input info
+        lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
+        if GetLastInputInfo(ctypes.byref(lii)):
+            tick = GetTickCount64() if GetTickCount64 else GetTickCount()
+            idle_ms = tick - lii.dwTime
+            idle_sec = idle_ms / 1000.0
+            logger.debug(f"useridle: real idle time = {idle_sec:.1f}s")
+            return idle_sec
+        else:
+            logger.debug("useridle: GetLastInputInfo failed")
+            return _time_since_boot()# ----------------------------------------------------------------------
 # Linux – unchanged original implementation
 # ----------------------------------------------------------------------
 elif sys.platform.startswith('linux'):
