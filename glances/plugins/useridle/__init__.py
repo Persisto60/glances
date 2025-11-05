@@ -54,99 +54,80 @@ if sys.platform.startswith('win'):
 
     # ------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# Windows – user-idle detection with logged-in user check (service-friendly)
+# Windows – REAL user idle time from service (using WTSLastInputTime)
 # ----------------------------------------------------------------------
 if sys.platform.startswith('win'):
     import ctypes
     from ctypes import wintypes
 
-    # Constants
+    # WinAPI constants
     WTS_CURRENT_SERVER_HANDLE = 0
-    WTS_CONSOLE_CONNECT = 1  # Interactive console session state
+    WTS_CURRENT_SESSION = -1
+    WTSLastInputTime = 10  # This is the key!
+
+    # Function prototypes
+    WTSGetActiveConsoleSessionId = ctypes.windll.kernel32.WTSGetActiveConsoleSessionId
     WTSQuerySessionInformation = ctypes.windll.wtsapi32.WTSQuerySessionInformationW
     WTSFreeMemory = ctypes.windll.wtsapi32.WTSFreeMemory
-    ProcessIdleTasksWTS = ctypes.windll.wtsapi32.ProcessIdleTasksWTS
-    GetLastInputInfo = ctypes.windll.user32.GetLastInputInfo
-    WTSGetActiveConsoleSessionId = ctypes.windll.kernel32.WTSGetActiveConsoleSessionId
     GetTickCount64 = getattr(ctypes.windll.kernel32, 'GetTickCount64', None)
     GetTickCount = ctypes.windll.kernel32.GetTickCount
 
-    class LASTINPUTINFO(ctypes.Structure):
-        _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
-
-    DEBUG_MODE = True  # Set to False once working; True forces obvious fixed values for testing
+    # Debug mode (set to False when working)
+    DEBUG_MODE = True  # Change to False after testing
 
     def _time_since_boot() -> float:
-        """Seconds since boot (no user case)."""
+        """Return seconds since system boot."""
         tick = GetTickCount64() if GetTickCount64 else GetTickCount()
         return tick / 1000.0
 
-    def _get_username_for_session(session_id: int) -> str | None:
-        """Get username for a session ID (confirms logged-in user)."""
-        try:
-            p_username = ctypes.c_void_p()
-            bytes_ret = wintypes.DWORD()
-            if WTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE, session_id, 5, ctypes.byref(p_username), ctypes.byref(bytes_ret)):  # 5 = WTSUserName
-                username = ctypes.cast(p_username, ctypes.c_wchar_p).value or None
-                WTSFreeMemory(p_username)
-                return username
-        except Exception:
-            pass
-        return None
-
     def _get_windows_idle_time() -> float | None:
         """
-        Get real user idle time if a user is logged in; else time since boot.
-        Service-friendly: checks session + username, refreshes idle tasks.
+        Returns user idle time if a user is logged in interactively.
+        Works when Glances runs as a Windows service.
+        Uses WTSLastInputTime (official API, no desktop switching needed).
         """
-        # Step 1: Get console session ID
+        # Step 1: Get active console session ID
         session_id = WTSGetActiveConsoleSessionId()
-        print(f"[DEBUG] useridle: Console session ID = {session_id}")  # Shows in Event Log
-        if session_id == 0xFFFFFFFF or session_id == 0:
-            print("[DEBUG] useridle: No console session → boot time")
-            if DEBUG_MODE:
-                return 99999.0  # Obvious "no user" value
-            return _time_since_boot()
+        print(f"[DEBUG] useridle: Console session ID = {session_id}")
 
-        # Step 2: Confirm interactive session + logged-in user
-        p_state = ctypes.c_void_p()
-        bytes_ret = wintypes.DWORD()
-        is_interactive = False
-        if WTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE, session_id, 4, ctypes.byref(p_state), ctypes.byref(bytes_ret)):  # 4 = WTSSessionId (state)
-            state = ctypes.cast(p_state, ctypes.POINTER(ctypes.c_uint))[0]
-            is_interactive = (state == WTS_CONSOLE_CONNECT)
-            WTSFreeMemory(p_state)
-        print(f"[DEBUG] useridle: Session {session_id} interactive? {is_interactive}")
-
-        username = _get_username_for_session(session_id)
-        print(f"[DEBUG] useridle: Username in session {session_id}: '{username}'")
-        if not is_interactive or not username:
-            print("[DEBUG] useridle: No interactive user → boot time")
+        # No interactive session (e.g. no user logged in)
+        if session_id in (0, 0xFFFFFFFF):
+            print("[DEBUG] useridle: No console session → using time since boot")
             if DEBUG_MODE:
                 return 99999.0
             return _time_since_boot()
 
-        # Step 3: Refresh idle tasks (service-friendly way to update input state)
-        if ProcessIdleTasksWTS(session_id):
-            print(f"[DEBUG] useridle: Refreshed idle tasks for session {session_id}")
-        else:
-            print(f"[DEBUG] useridle: ProcessIdleTasksWTS failed for session {session_id}")
+        # Step 2: Query last input time for this session
+        p_last_input = ctypes.c_void_p()
+        bytes_returned = wintypes.DWORD()
 
-        # Step 4: Get last input (now should reflect user's session)
-        lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
-        if GetLastInputInfo(ctypes.byref(lii)):
-            tick = GetTickCount64() if GetTickCount64 else GetTickCount()
-            idle_ms = tick - lii.dwTime
-            idle_sec = idle_ms / 1000.0
-            print(f"[DEBUG] useridle: Raw GetLastInputInfo → {idle_sec:.1f}s")
+        if not WTSQuerySessionInformation(
+            WTS_CURRENT_SERVER_HANDLE,
+            session_id,
+            WTSLastInputTime,
+            ctypes.byref(p_last_input),
+            ctypes.byref(bytes_returned)
+        ):
+            print(f"[DEBUG] useridle: WTSQuerySessionInformation failed (error {ctypes.GetLastError()})")
             if DEBUG_MODE:
-                return 123.0 if idle_sec < 300 else 456.0  # Obvious "success but short/long idle" for testing
-            return idle_sec
-        else:
-            print("[DEBUG] useridle: GetLastInputInfo failed → boot time")
-            if DEBUG_MODE:
-                return 888.0  # Obvious "query failed" value
+                return 888.0
             return _time_since_boot()
+
+        try:
+            # The returned value is a LARGE_INTEGER (8 bytes) of milliseconds since boot
+            last_input_ms = ctypes.cast(p_last_input, ctypes.POINTER(ctypes.c_ulonglong))[0]
+            current_tick = GetTickCount64() if GetTickCount64 else GetTickCount()
+            idle_ms = current_tick - last_input_ms
+            idle_sec = idle_ms / 1000.0
+
+            print(f"[DEBUG] useridle: Session {session_id} last input {last_input_ms} ms, idle = {idle_sec:.1f}s")
+
+            if DEBUG_MODE:
+                return 123.0 if idle_sec < 300 else 456.0  # Fake values for testing
+            return idle_sec
+
+        finally:
+            WTSFreeMemory(p_last_input)
 # ----------------------------------------------------------------------
 # Linux – unchanged original implementation
 # ----------------------------------------------------------------------
