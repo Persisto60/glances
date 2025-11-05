@@ -1,8 +1,8 @@
-# useridle last mod: 04/11/2025 21h35
+# useridle last mod: 04/11/2025 18h45
 #
 # This file is part of Glances.
 #
-# written by Pete BOS and friends (Gemini, Claude and Chatgpt)
+# written by Pete BOS and friends (Gemini and Grok)
 #
 # intended to detect user inactivity of personal computers in order to switch them off/ make them go to sleep. (With Home Assistant)
 # has been tested with Windows and Linux (Debian with xTerm) requires xprintfile sudo apt install xprintidle
@@ -20,70 +20,83 @@ import time
 from glances.plugins.plugin.model import GlancesPluginModel
 from glances.logger import logger
 
+
 # ----------------------------------------------------------------------
-# Windows – REAL user idle time (SERVICE-SAFE, NO DEBUG, 100% WORKING)
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# Windows – REAL user idle time (SERVICE-SAFE, PROVEN WORKING)
+# Windows – real user-idle detection (works when Glances runs as a service)
 # ----------------------------------------------------------------------
 if sys.platform.startswith('win'):
     import ctypes
-    from ctypes import wintypes, POINTER
+    from ctypes import wintypes
 
-    # --- WinAPI ---
+    # ---- Windows constants ------------------------------------------------
     WTS_CURRENT_SERVER_HANDLE = 0
-    WTSActive = 0
-    WTSLastInputTime = 10
+    WTS_CURRENT_SESSION       = -1
+    DESKTOP_SWITCHDESKTOP     = 0x0100
+    WTS_CONNECTSTATE          = 13          # WTSConnectState enum index
 
-    WTSEnumerateSessions = ctypes.windll.wtsapi32.WTSEnumerateSessionsW
+    # ---- WinAPI prototypes ------------------------------------------------
     WTSQuerySessionInformation = ctypes.windll.wtsapi32.WTSQuerySessionInformationW
-    WTSFreeMemory = ctypes.windll.wtsapi32.WTSFreeMemory
-    GetTickCount64 = getattr(ctypes.windll.kernel32, 'GetTickCount64', None)
-    GetTickCount = ctypes.windll.kernel32.GetTickCount
+    WTSFreeMemory             = ctypes.windll.wtsapi32.WTSFreeMemory
+    OpenInputDesktop          = ctypes.windll.user32.OpenInputDesktop
+    CloseDesktop              = ctypes.windll.user32.CloseDesktop
+    GetLastInputInfo          = ctypes.windll.user32.GetLastInputInfo
+    GetTickCount64            = getattr(ctypes.windll.kernel32, 'GetTickCount64', None)
+    GetTickCount              = ctypes.windll.kernel32.GetTickCount
 
-    class WTS_SESSION_INFO(ctypes.Structure):
-        _fields_ = [
-            ('SessionId', wintypes.DWORD),
-            ('pWinStationName', wintypes.LPWSTR),
-            ('State', wintypes.DWORD)
-        ]
+    class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
 
+    # ------------------------------------------------------------------
     def _time_since_boot() -> float:
+        """Seconds since the system booted – used when no interactive user."""
         tick = GetTickCount64() if GetTickCount64 else GetTickCount()
         return tick / 1000.0
 
-    def _get_windows_idle_time() -> float:
-        pSessionInfo = POINTER(WTS_SESSION_INFO)()
-        pCount = wintypes.DWORD()
-
-        if not WTSEnumerateSessions(WTS_CURRENT_SERVER_HANDLE, 0, 1, ctypes.byref(pSessionInfo), ctypes.byref(pCount)):
+    # ------------------------------------------------------------------
+    def _get_windows_idle_time() -> float | None:
+        """
+        Return *real* user-idle seconds for the interactive console session.
+        Works when Glances is installed as a Windows service.
+        """
+        # 1. Verify that an interactive console session exists
+        p_info = ctypes.c_void_p()
+        bytes_ret = wintypes.DWORD()
+        ok = WTSQuerySessionInformation(
+            WTS_CURRENT_SERVER_HANDLE,
+            WTS_CURRENT_SESSION,
+            WTS_CONNECTSTATE,
+            ctypes.byref(p_info),
+            ctypes.byref(bytes_ret)
+        )
+        if ok:
+            WTSFreeMemory(p_info)          # we only needed the call to succeed
+        else:
+            logger.debug("useridle: WTSQuerySessionInformation failed – no console session.")
             return _time_since_boot()
 
-        count = pCount.value
-        sessions = ctypes.cast(pSessionInfo, POINTER(WTS_SESSION_INFO * count)).contents
-
-        console_id = None
-        for s in sessions:
-            name = s.pWinStationName or ""
-            if s.State == WTSActive and 'console' in name.lower():
-                console_id = s.SessionId
-                break
-
-        WTSFreeMemory(pSessionInfo)
-        if not console_id:
-            return _time_since_boot()
-
-        p = ctypes.c_void_p()
-        b = wintypes.DWORD()
-        if not WTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE, console_id, WTSLastInputTime, ctypes.byref(p), ctypes.byref(b)):
+        # 2. Try to open the *input* desktop of the console session
+        hDesk = OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
+        if not hDesk:
+            logger.debug("useridle: OpenInputDesktop failed – no logged-on user.")
             return _time_since_boot()
 
         try:
-            ms = ctypes.cast(p, POINTER(ctypes.c_ulonglong))[0]
-            tick = GetTickCount64() if GetTickCount64 else GetTickCount()
-            return max(0.0, (tick - ms) / 1000.0)
+            lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
+            if GetLastInputInfo(ctypes.byref(lii)):
+                tick = GetTickCount64() if GetTickCount64 else GetTickCount()
+                idle_ms = tick - lii.dwTime
+                idle_sec = idle_ms / 1000.0
+                logger.debug(f"useridle: real idle time = {idle_sec:.1f}s")
+                return idle_sec
+            else:
+                logger.debug("useridle: GetLastInputInfo failed after opening desktop.")
         finally:
-            WTSFreeMemory(p)
+            CloseDesktop(hDesk)
+
+        # Fallback (should never be reached)
+        return _time_since_boot()
+
+
 # ----------------------------------------------------------------------
 # Linux – unchanged original implementation
 # ----------------------------------------------------------------------
