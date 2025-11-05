@@ -72,13 +72,13 @@ if sys.platform.startswith('win'):
             WTSFreeMemory(p_info)          # we only needed the call to succeed
         else:
             logger.debug("useridle: WTSQuerySessionInformation failed – no console session.")
-            return _time_since_boot()
+            return "NC" #_time_since_boot()
 
         # 2. Try to open the *input* desktop of the console session
         hDesk = OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
         if not hDesk:
             logger.debug("useridle: OpenInputDesktop failed – no logged-on user.")
-            return _time_since_boot()
+            return "NU" #_time_since_boot()
 
         try:
             lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
@@ -94,7 +94,7 @@ if sys.platform.startswith('win'):
             CloseDesktop(hDesk)
 
         # Fallback (should never be reached)
-        return _time_since_boot()
+        return "FB" _time_since_boot()
 
 
 # ----------------------------------------------------------------------
