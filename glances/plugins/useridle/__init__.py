@@ -147,7 +147,6 @@ if sys.platform.startswith('win'):
             if DEBUG_MODE:
                 return 888.0  # Obvious "query failed" value
             return _time_since_boot()
-
 # ----------------------------------------------------------------------
 # Linux – unchanged original implementation
 # ----------------------------------------------------------------------
