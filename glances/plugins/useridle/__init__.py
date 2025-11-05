@@ -1,4 +1,4 @@
-# useridle last mod: 04/11/2025 20h30
+# useridle last mod: 04/11/2025 20h45
 #
 # This file is part of Glances.
 #
@@ -20,39 +20,6 @@ import time
 from glances.plugins.plugin.model import GlancesPluginModel
 from glances.logger import logger
 
-
-# ----------------------------------------------------------------------
-# Windows – real user-idle detection (works when Glances runs as a service)
-# ----------------------------------------------------------------------
-if sys.platform.startswith('win'):
-    import ctypes
-    from ctypes import wintypes
-
-    # ---- Windows constants ------------------------------------------------
-    WTS_CURRENT_SERVER_HANDLE = 0
-    WTS_CURRENT_SESSION       = -1
-    DESKTOP_SWITCHDESKTOP     = 0x0100
-    WTS_CONNECTSTATE          = 13          # WTSConnectState enum index
-
-    # ---- WinAPI prototypes ------------------------------------------------
-    WTSQuerySessionInformation = ctypes.windll.wtsapi32.WTSQuerySessionInformationW
-    WTSFreeMemory             = ctypes.windll.wtsapi32.WTSFreeMemory
-    OpenInputDesktop          = ctypes.windll.user32.OpenInputDesktop
-    CloseDesktop              = ctypes.windll.user32.CloseDesktop
-    GetLastInputInfo          = ctypes.windll.user32.GetLastInputInfo
-    GetTickCount64            = getattr(ctypes.windll.kernel32, 'GetTickCount64', None)
-    GetTickCount              = ctypes.windll.kernel32.GetTickCount
-
-    class LASTINPUTINFO(ctypes.Structure):
-        _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
-
-    # ------------------------------------------------------------------
-    def _time_since_boot() -> float:
-        """Seconds since the system booted – used when no interactive user."""
-        tick = GetTickCount64() if GetTickCount64 else GetTickCount()
-        return tick / 1000.0
-
-    # ------------------------------------------------------------------
 # ----------------------------------------------------------------------
 # Windows – REAL user idle time from service (using WTSLastInputTime)
 # ----------------------------------------------------------------------
