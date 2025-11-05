@@ -1,4 +1,4 @@
-# useridle last mod: 04/11/2025 21h20
+# useridle last mod: 04/11/2025 21h35
 #
 # This file is part of Glances.
 #
