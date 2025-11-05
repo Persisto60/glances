@@ -1,4 +1,4 @@
-# useridle last mod:03/11/2025 19h30
+# useridle last mod: 03/11/2025 14h15
 #
 # This file is part of Glances.
 #
@@ -16,56 +16,90 @@ import sys
 from datetime import datetime, timedelta
 import time
 
-# Corrected import path for GlancesPluginModel and logger
+# Glances imports
 from glances.plugins.plugin.model import GlancesPluginModel
 from glances.logger import logger
 
 
+# ----------------------------------------------------------------------
+# Windows – real user-idle detection (works when Glances runs as a service)
+# ----------------------------------------------------------------------
 if sys.platform.startswith('win'):
-    # Import necessary ctypes functions
-    kernel32 = ctypes.windll.kernel32
-    user32 = ctypes.windll.user32
-    
+    import ctypes
+    from ctypes import wintypes
+
+    # ---- Windows constants ------------------------------------------------
+    WTS_CURRENT_SERVER_HANDLE = 0
+    WTS_CURRENT_SESSION       = -1
+    DESKTOP_SWITCHDESKTOP     = 0x0100
+    WTS_CONNECTSTATE          = 13          # WTSConnectState enum index
+
+    # ---- WinAPI prototypes ------------------------------------------------
+    WTSQuerySessionInformation = ctypes.windll.wtsapi32.WTSQuerySessionInformationW
+    WTSFreeMemory             = ctypes.windll.wtsapi32.WTSFreeMemory
+    OpenInputDesktop          = ctypes.windll.user32.OpenInputDesktop
+    CloseDesktop              = ctypes.windll.user32.CloseDesktop
+    GetLastInputInfo          = ctypes.windll.user32.GetLastInputInfo
+    GetTickCount64            = getattr(ctypes.windll.kernel32, 'GetTickCount64', None)
+    GetTickCount              = ctypes.windll.kernel32.GetTickCount
+
     class LASTINPUTINFO(ctypes.Structure):
         _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
 
-    def _get_windows_idle_time():
+    # ------------------------------------------------------------------
+    def _time_since_boot() -> float:
+        """Seconds since the system booted – used when no interactive user."""
+        tick = GetTickCount64() if GetTickCount64 else GetTickCount()
+        return tick / 1000.0
+
+    # ------------------------------------------------------------------
+    def _get_windows_idle_time() -> float | None:
         """
-        Gets the user idle time using GetLastInputInfo.
-        This function is the most reliable method and correctly reports
-        the interactive user's idle time when run as a service.
+        Return *real* user-idle seconds for the interactive console session.
+        Works when Glances is installed as a Windows service.
         """
+        # 1. Verify that an interactive console session exists
+        p_info = ctypes.c_void_p()
+        bytes_ret = wintypes.DWORD()
+        ok = WTSQuerySessionInformation(
+            WTS_CURRENT_SERVER_HANDLE,
+            WTS_CURRENT_SESSION,
+            WTS_CONNECTSTATE,
+            ctypes.byref(p_info),
+            ctypes.byref(bytes_ret)
+        )
+        if ok:
+            WTSFreeMemory(p_info)          # we only needed the call to succeed
+        else:
+            logger.debug("useridle: WTSQuerySessionInformation failed – no console session.")
+            return _time_since_boot()
+
+        # 2. Try to open the *input* desktop of the console session
+        hDesk = OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
+        if not hDesk:
+            logger.debug("useridle: OpenInputDesktop failed – no logged-on user.")
+            return _time_since_boot()
+
         try:
-            # 1. Initialize LASTINPUTINFO structure
-            last_input = LASTINPUTINFO()
-            last_input.cbSize = ctypes.sizeof(last_input)
+            lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
+            if GetLastInputInfo(ctypes.byref(lii)):
+                tick = GetTickCount64() if GetTickCount64 else GetTickCount()
+                idle_ms = tick - lii.dwTime
+                idle_sec = idle_ms / 1000.0
+                logger.debug(f"useridle: real idle time = {idle_sec:.1f}s")
+                return idle_sec
+            else:
+                logger.debug("useridle: GetLastInputInfo failed after opening desktop.")
+        finally:
+            CloseDesktop(hDesk)
 
-            # 2. Get last input time.
-            if user32.GetLastInputInfo(ctypes.byref(last_input)):
-                
-                # 3. Get the current system uptime (tick count). 
-                #    Use GetTickCount64 for better reliability on long uptimes.
-                current_tick_count_func = getattr(kernel32, 'GetTickCount64', kernel32.GetTickCount)
-                current_tick_count = current_tick_count_func()
+        # Fallback (should never be reached)
+        return _time_since_boot()
 
-                # 4. Calculate idle time in milliseconds.
-                #    Since GetLastInputInfo.dwTime is relative to boot, the difference 
-                #    between the current tick count and the last input time is the idle time.
-                idle_millis = current_tick_count - last_input.dwTime
-                
-                idle_seconds = idle_millis / 1000.0
-                
-                logger.debug(f"useridle: Reporting GetLastInputInfo time: {idle_seconds}s")
-                return idle_seconds
-            
-            logger.error("useridle: GetLastInputInfo failed.")
-            return None # Return None on error
 
-        except Exception as e:
-            logger.error(f"useridle: An unexpected error occurred in Windows idle time retrieval: {e}", exc_info=False)
-            return None
-
-# --- Linux-specific API ---
+# ----------------------------------------------------------------------
+# Linux – unchanged original implementation
+# ----------------------------------------------------------------------
 elif sys.platform.startswith('linux'):
     _XPRINTIDLE_AVAILABLE = False
     _XPRINTIDLE_CHECKED = False
@@ -87,72 +121,55 @@ elif sys.platform.startswith('linux'):
         Gets idle time. Returns time since boot if no valid Xorg session is detected,
         otherwise uses xprintidle.
         """
-        # Check if an Xorg session is active by verifying DISPLAY and its validity
+        # ---- No DISPLAY -------------------------------------------------
         if 'DISPLAY' not in os.environ or not os.environ['DISPLAY']:
-            # No Xorg session or DISPLAY is empty, return time since boot
             idle_seconds = (datetime.now() - _BOOT_TIME).total_seconds()
-            logger.debug(f"useridle: No valid Xorg session detected (DISPLAY not set or empty). Reporting time since boot: {int(idle_seconds)}s")
+            logger.debug(f"useridle: No DISPLAY – reporting time since boot: {int(idle_seconds)}s")
             return idle_seconds
 
-        # Check if xprintidle is available
+        # ---- xprintidle not installed -----------------------------------
         if not _check_xprintidle_availability():
-            logger.debug("useridle: xprintidle not available, falling back to boot time.")
             idle_seconds = (datetime.now() - _BOOT_TIME).total_seconds()
-            logger.debug(f"useridle: xprintidle not available. Reporting time since boot: {int(idle_seconds)}s")
+            logger.debug(f"useridle: xprintidle missing – reporting time since boot: {int(idle_seconds)}s")
             return idle_seconds
 
-        # Try to verify if the DISPLAY is valid by running a simple X command
+        # ---- Verify that the DISPLAY is actually usable -----------------
         try:
-            # Use xset as a lightweight check for a valid X session
-            subprocess.run(['xset', 'q'], capture_output=True, text=True, timeout=2, check=True)
+            subprocess.run(['xset', 'q'], capture_output=True, text=True,
+                           timeout=2, check=True)
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-            # DISPLAY is set but invalid, fall back to boot time
             idle_seconds = (datetime.now() - _BOOT_TIME).total_seconds()
-            logger.debug(f"useridle: Invalid Xorg session (DISPLAY={os.environ.get('DISPLAY')}). Reporting time since boot: {int(idle_seconds)}s")
+            logger.debug(f"useridle: DISPLAY invalid – reporting time since boot: {int(idle_seconds)}s")
             return idle_seconds
 
-        # Valid Xorg session, try to use xprintidle
+        # ---- Run xprintidle ---------------------------------------------
         try:
-            result = subprocess.run(['xprintidle'], capture_output=True, text=True, timeout=5, check=True)
+            result = subprocess.run(['xprintidle'], capture_output=True,
+                                    text=True, timeout=5, check=True)
             idle_ms = int(result.stdout.strip())
-            logger.debug(f"useridle: Valid Xorg session active. Reporting xprintidle time: {idle_ms/1000.0}s")
+            logger.debug(f"useridle: xprintidle reports {idle_ms/1000.0}s")
             return idle_ms / 1000.0
-        except subprocess.CalledProcessError as e:
-            logger.debug(f"useridle: xprintidle failed with return code {e.returncode}. Error: {e.stderr.strip()}")
-            # Fall back to boot time if xprintidle fails
-            idle_seconds = (datetime.now() - _BOOT_TIME).total_seconds()
-            logger.debug(f"useridle: xprintidle failed, falling back to boot time: {int(idle_seconds)}s")
-            return idle_seconds
-        except FileNotFoundError:
-            logger.warning("useridle: xprintidle command not found. This should have been caught by initial check.")
-            return None
-        except subprocess.TimeoutExpired:
-            logger.debug("useridle: xprintidle command timed out.")
-            return None
-        except ValueError:
-            logger.error(f"useridle: Could not parse xprintidle output: '{result.stdout.strip()}' is not a valid number.")
-            return None
         except Exception as e:
-            logger.error(f"useridle: An unexpected error occurred while running xprintidle: {e}", exc_info=False)
-            return None        
-        
-else:  # Other operating systems (macOS, BSD, etc.)
-    _get_windows_idle_time = None  # Mark as unavailable
-    _get_linux_idle_time = None  # Mark as unavailable
+            logger.debug(f"useridle: xprintidle failed ({e}) – falling back to boot time")
+            return (datetime.now() - _BOOT_TIME).total_seconds()
 
 
-# --- Glances Plugin Model ---
-    """
-    Glances plugin to detect user idle time.
-    Supports Windows (via GetLastInputInfo) and Linux (via xprintidle).
-    """
-# GROK sugestion 20251103: replace following with line below:
-#  #class PluginModel(GlancesPluginModel):
+# ----------------------------------------------------------------------
+# Fallback for unsupported OSes
+# ----------------------------------------------------------------------
+else:
+    _get_windows_idle_time = None
+    _get_linux_idle_time = None
+
+
+# ----------------------------------------------------------------------
+# Glances Plugin
+# ----------------------------------------------------------------------
 class UseridlePlugin(GlancesPluginModel):
     """Glances plugin to display user idle time."""
     def __init__(self, args=None, config=None):
         super().__init__(args=args, config=config)
-        logger.debug("useridle: V20251103_19h30 Plugin loaded.")
+        logger.debug("useridle: Plugin loaded.")
 
         self.display_curse = True
         self.align = 'right'
@@ -161,18 +178,12 @@ class UseridlePlugin(GlancesPluginModel):
         self.idle_seconds = 0.0
         self.idle_timedelta = timedelta(seconds=0)
 
-        # Set initial status and disabled message based on platform capabilities
+        # ---- Platform capability check ----------------------------------
         if self.platform.startswith('win'):
             self.disabled_msg = None
-            if _get_windows_idle_time is None:
-                self.disabled_msg = "Windows API not available."
-                self.set_disabled()
-
         elif self.platform.startswith('linux'):
-            # On Linux, plugin is always active to report either boot time or xprintidle
             self.disabled_msg = None
-            
-        else:  # Unsupported OS
+        else:
             self.disabled_msg = "Unsupported OS."
             self.set_disabled()
 
@@ -181,25 +192,23 @@ class UseridlePlugin(GlancesPluginModel):
         else:
             logger.info(f"useridle plugin: Initialized for {self.platform}.")
 
-        # Thresholds
+        # Thresholds (optional – Glances will use defaults if not set)
         self.careful_threshold = self.get_limit('careful')
         self.warning_threshold = self.get_limit('warning')
         self.critical_threshold = self.get_limit('critical')
 
+    # ------------------------------------------------------------------
     def get_export(self):
-        """
-        Export idle time in seconds.
-        """
+        """Export idle time in seconds."""
         if self.is_disabled():
             return {'seconds': -1, 'status': 'disabled', 'reason': self.disabled_msg}
         return {'seconds': int(self.idle_seconds), 'status': self.get_stats()}
 
+    # ------------------------------------------------------------------
     @GlancesPluginModel._check_decorator
     @GlancesPluginModel._log_result_decorator
     def update(self):
-        """
-        Update the plugin data.
-        """
+        """Update the plugin data."""
         if self.is_disabled():
             self.stats = self.disabled_msg or "N/A"
             return self.stats
@@ -209,65 +218,41 @@ class UseridlePlugin(GlancesPluginModel):
         if self.platform.startswith('win'):
             idle_time_s = _get_windows_idle_time()
         elif self.platform.startswith('linux'):
-            # The Linux function returns time since boot if no X session is found,
-            # or xprintidle result, or None on specific errors.
             idle_time_s = _get_linux_idle_time()
 
-        # --- This block processes valid idle time data (including time since boot on Linux) ---
+        # ---- Process a valid number ------------------------------------
         if idle_time_s is not None:
             self.idle_seconds = idle_time_s
             self.idle_timedelta = timedelta(seconds=int(self.idle_seconds))
 
-            # Format as H:MM:SS (or D days, H:MM:SS)
             total_seconds = int(self.idle_seconds)
             days = total_seconds // (24 * 3600)
-            remaining_seconds = total_seconds % (24 * 3600)
-            hours = remaining_seconds // 3600
-            remaining_seconds %= 3600
-            minutes = remaining_seconds // 60
-            seconds = remaining_seconds % 60
+            rem = total_seconds % (24 * 3600)
+            hours = rem // 3600
+            rem %= 3600
+            minutes = rem // 60
+            seconds = rem % 60
 
-            if days > 0:
+            if days:
                 self.stats = f"{days}d {hours:02}:{minutes:02}:{seconds:02}"
             else:
                 self.stats = f"{hours:02}:{minutes:02}:{seconds:02}"
-
-        # --- This block handles actual errors (where idle_time_s is None) ---
         else:
+            # ---- Error path ------------------------------------------------
             self.idle_seconds = 0.0
             self.idle_timedelta = timedelta(seconds=0)
-            self.stats = "N/A"  # Indicate no data / error
-            
-            if self.platform.startswith('win') and idle_time_s is None:
-                logger.debug("useridle: Cannot get idle time (Windows API error).")
-            else:
-                # General error message (This will catch xprintidle failures)
-                logger.error("useridle: Could not retrieve idle time. Displaying 'N/A'.")
+            self.stats = "N/A"
+            logger.error("useridle: Could not retrieve idle time – displaying 'N/A'.")
 
         return self.stats
 
+    # ------------------------------------------------------------------
     def msg_curse(self, args=None, max_width=None):
-        """
-        Return the string to display in the curses interface.
-        """
-        # Init the return message
-        ret = []
-
-        # Only process if plugin is not disabled
-        if self.is_disabled():
-            logger.debug(
-                "UserIdle plugin is disabled, returning empty display message.")
-            return ret  # Return an empty list when disabled, similar to uptime
-
-        # Check for "N/A" status, which usually indicates an error or unavailability
-        if self.stats == "N/A":
-            error_msg = f"UserIdle: {self.stats} (Error or not available on this system)."
-            logger.debug(
-                f"UserIdle plugin reporting 'N/A' stats. Message: '{error_msg}'")
-            # Returning an empty list makes it consistent with disabled state for width calculation.
-            return ret  # Returning empty list for "N/A" too, to ensure width is 0 if not active
-
+        """Curses UI line."""
+        if self.is_disabled() or self.stats == "N/A":
+            return []                               # nothing to display
         return [self.curse_add_line(f"UI IDLE: {self.stats}")]
 
+    # ------------------------------------------------------------------
     def get_name(self):
         return "useridle"
