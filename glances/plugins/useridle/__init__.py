@@ -53,58 +53,36 @@ if sys.platform.startswith('win'):
         tick = GetTickCount64() if GetTickCount64 else GetTickCount()
         return tick / 1000.0
 
+# --- IN GLANCES PLUGIN ---
     def _get_windows_idle_time() -> float:
-        """
-        Returns real user idle time if a user is logged in on the console.
-        Works 100% when Glances runs as a Windows service.
-        """
-        # Step 1: Enumerate all sessions
         pSessionInfo = POINTER(WTS_SESSION_INFO)()
         pCount = wintypes.DWORD()
-
         if not WTSEnumerateSessions(WTS_CURRENT_SERVER_HANDLE, 0, 1, ctypes.byref(pSessionInfo), ctypes.byref(pCount)):
             return _time_since_boot()
 
         count = pCount.value
         sessions = ctypes.cast(pSessionInfo, POINTER(WTS_SESSION_INFO * count)).contents
-
-        active_console_session_id = None
-
-        # Step 2: Find active console session
-        for i in range(count):
-            session = sessions[i]
-            if session.State == WTSActive:
-                name = session.pWinStationName
-                if name and name.lower() in ('console', ''):
-                    active_console_session_id = session.SessionId
-                    break
-
-        # Step 3: Free session list
+        console_id = None
+        for s in sessions:
+            name = s.pWinStationName or ""
+            if s.State == WTSActive and 'console' in name.lower():
+                console_id = s.SessionId
+                break
         WTSFreeMemory(pSessionInfo)
-
-        if not active_console_session_id:
+        if not console_id:
             return _time_since_boot()
 
-        # Step 4: Query last input time for this session
-        p_last_input = ctypes.c_void_p()
-        bytes_returned = wintypes.DWORD()
-
-        if not WTSQuerySessionInformation(
-            WTS_CURRENT_SERVER_HANDLE,
-            active_console_session_id,
-            WTSLastInputTime,
-            ctypes.byref(p_last_input),
-            ctypes.byref(bytes_returned)
-        ):
+        p = ctypes.c_void_p()
+        b = wintypes.DWORD()
+        if not WTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE, console_id, WTSLastInputTime, ctypes.byref(p), ctypes.byref(b)):
             return _time_since_boot()
 
         try:
-            last_input_ms = ctypes.cast(p_last_input, POINTER(ctypes.c_ulonglong))[0]
-            current_tick = GetTickCount64() if GetTickCount64 else GetTickCount()
-            idle_sec = (current_tick - last_input_ms) / 1000.0
-            return max(0.0, idle_sec)
+            ms = ctypes.cast(p, POINTER(ctypes.c_ulonglong))[0]
+            tick = GetTickCount64() if GetTickCount64 else GetTickCount()
+            return max(0.0, (tick - ms) / 1000.0)
         finally:
-            WTSFreeMemory(p_last_input)
+            WTSFreeMemory(p)
 # ----------------------------------------------------------------------
 # Linux – unchanged original implementation
 # ----------------------------------------------------------------------
