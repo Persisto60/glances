@@ -1,4 +1,4 @@
-# useridle last mod: 04/11/2025 20h45
+# useridle last mod: 04/11/2025 21h10
 #
 # This file is part of Glances.
 #
@@ -40,7 +40,7 @@ if sys.platform.startswith('win'):
     GetTickCount = ctypes.windll.kernel32.GetTickCount
 
     # Debug mode (set to False when working)
-    DEBUG_MODE = True  # Change to False after testing
+    DEBUG_MODE = False  # Change to False after testing
 
     def _time_since_boot() -> float:
         """Return seconds since system boot."""
