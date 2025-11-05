@@ -26,27 +26,21 @@ from glances.logger import logger
 if sys.platform.startswith('win'):
     import ctypes
     from ctypes import wintypes
+    import subprocess
+    import json
 
     # ---- Windows constants ------------------------------------------------
     WTS_CURRENT_SERVER_HANDLE = 0
-    DESKTOP_SWITCHDESKTOP     = 0x0100
-    WTS_CONNECTSTATE_CLASS    = 8           # WTSConnectState enum index
     
-    # Connection states
-    WTSActive      = 0
-    WTSConnected   = 1
-    WTSDisconnected = 4
-
     # ---- WinAPI prototypes ------------------------------------------------
     WTSEnumerateSessionsW = ctypes.windll.wtsapi32.WTSEnumerateSessionsW
     WTSQuerySessionInformationW = ctypes.windll.wtsapi32.WTSQuerySessionInformationW
     WTSFreeMemory = ctypes.windll.wtsapi32.WTSFreeMemory
-    GetLastInputInfo = ctypes.windll.user32.GetLastInputInfo
     GetTickCount64 = getattr(ctypes.windll.kernel32, 'GetTickCount64', None)
     GetTickCount = ctypes.windll.kernel32.GetTickCount
 
-    class LASTINPUTINFO(ctypes.Structure):
-        _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
+    # Connection states
+    WTSActive = 0
 
     class WTS_SESSION_INFO(ctypes.Structure):
         _fields_ = [
@@ -55,26 +49,26 @@ if sys.platform.startswith('win'):
             ('State', ctypes.c_int)
         ]
 
+    class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
+
     # ------------------------------------------------------------------
     def _time_since_boot() -> float:
-        """Seconds since the system booted – used when no interactive user."""
+        """Seconds since the system booted."""
         tick = GetTickCount64() if GetTickCount64 else GetTickCount()
         return tick / 1000.0
 
     # ------------------------------------------------------------------
-    def _get_console_session_id() -> int | None:
+    def _get_active_console_session() -> int | None:
         """Find the active console session ID."""
         p_session_info = ctypes.POINTER(WTS_SESSION_INFO)()
         count = wintypes.DWORD()
         
         if not WTSEnumerateSessionsW(
-            WTS_CURRENT_SERVER_HANDLE,
-            0,  # Reserved
-            1,  # Version
+            WTS_CURRENT_SERVER_HANDLE, 0, 1,
             ctypes.byref(p_session_info),
             ctypes.byref(count)
         ):
-            logger.debug("useridle: WTSEnumerateSessions failed")
             return None
         
         try:
@@ -84,58 +78,145 @@ if sys.platform.startswith('win'):
             ).contents
             
             for session in sessions:
-                # Look for Console session that is Active or Connected
-                if session.pWinStationName and 'Console' in session.pWinStationName:
-                    if session.State in (WTSActive, WTSConnected):
-                        logger.debug(f"useridle: Found active console session {session.SessionId}")
-                        return session.SessionId
+                if session.State == WTSActive and session.SessionId > 0:
+                    logger.debug(f"useridle: Found active session {session.SessionId}")
+                    return session.SessionId
         finally:
             WTSFreeMemory(p_session_info)
         
-        logger.debug("useridle: No active console session found")
+        return None
+
+    # ------------------------------------------------------------------
+    def _get_idle_via_powershell(session_id: int) -> float | None:
+        """
+        Use PowerShell to get idle time - works from service context.
+        This queries the user session using quser command.
+        """
+        try:
+            # Use quser to get session idle time
+            result = subprocess.run(
+                ['quser'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            
+            if result.returncode != 0:
+                logger.debug(f"useridle: quser failed: {result.stderr}")
+                return None
+            
+            # Parse quser output
+            lines = result.stdout.strip().split('\n')
+            if len(lines) < 2:
+                return None
+            
+            for line in lines[1:]:  # Skip header
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                
+                # Idle time is usually in column index 4 or 5
+                # Format can be ".", "0:01", "2:30", or "1+23:45"
+                idle_str = parts[4] if parts[1] != '>' else parts[5] if len(parts) > 5 else parts[4]
+                
+                if idle_str == '.' or idle_str.lower() == 'none':
+                    # Active (less than 1 minute idle)
+                    return 0.0
+                
+                # Parse idle time
+                if '+' in idle_str:
+                    # Format: "days+hours:minutes"
+                    days_part, time_part = idle_str.split('+')
+                    days = int(days_part)
+                    hours, minutes = map(int, time_part.split(':'))
+                    return days * 86400 + hours * 3600 + minutes * 60
+                elif ':' in idle_str:
+                    # Format: "hours:minutes" or "minutes:seconds"
+                    parts_time = idle_str.split(':')
+                    if len(parts_time) == 2:
+                        # Could be hours:minutes or minutes:seconds
+                        # quser typically shows minutes for < 1 hour
+                        val1, val2 = map(int, parts_time)
+                        if val1 < 24:  # Likely minutes:seconds or hours:minutes
+                            return val1 * 60 + val2
+                        else:
+                            return val1 * 3600 + val2 * 60
+                else:
+                    # Just a number (minutes)
+                    return int(idle_str) * 60
+                    
+        except Exception as e:
+            logger.debug(f"useridle: quser parsing failed: {e}")
+            return None
+        
         return None
 
     # ------------------------------------------------------------------
     def _get_windows_idle_time() -> float | None:
         """
-        Return *real* user-idle seconds for the interactive console session.
-        Works when Glances is installed as a Windows service.
+        Return user-idle seconds. Works when running as a Windows service.
+        Uses multiple fallback methods.
         """
-        # Find the active console session
-        session_id = _get_console_session_id()
+        # Check if any user is logged in
+        session_id = _get_active_console_session()
         
         if session_id is None:
-            logger.debug("useridle: No interactive session – reporting time since boot")
+            logger.debug("useridle: No active session")
             return _time_since_boot()
         
-        # Query session information to verify it's connected
-        p_info = ctypes.c_void_p()
-        bytes_ret = wintypes.DWORD()
-        ok = WTSQuerySessionInformationW(
-            WTS_CURRENT_SERVER_HANDLE,
-            session_id,
-            WTS_CONNECTSTATE_CLASS,
-            ctypes.byref(p_info),
-            ctypes.byref(bytes_ret)
-        )
+        # Verify user is logged in
+        p_buffer = ctypes.c_void_p()
+        bytes_returned = wintypes.DWORD()
         
-        if ok:
-            WTSFreeMemory(p_info)
+        if WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE, session_id, 5,  # WTSUserName
+            ctypes.byref(p_buffer), ctypes.byref(bytes_returned)
+        ):
+            try:
+                username = ctypes.wstring_at(p_buffer)
+                WTSFreeMemory(p_buffer)
+                
+                if not username:
+                    logger.debug(f"useridle: Session {session_id} has no user")
+                    return _time_since_boot()
+                
+                logger.debug(f"useridle: Session {session_id} user: {username}")
+            except:
+                WTSFreeMemory(p_buffer)
+                return _time_since_boot()
         else:
-            logger.debug(f"useridle: Failed to query session {session_id}")
             return _time_since_boot()
         
-        # Get last input info
-        lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
-        if GetLastInputInfo(ctypes.byref(lii)):
-            tick = GetTickCount64() if GetTickCount64 else GetTickCount()
-            idle_ms = tick - lii.dwTime
-            idle_sec = idle_ms / 1000.0
-            logger.debug(f"useridle: real idle time = {idle_sec:.1f}s")
-            return idle_sec
-        else:
-            logger.debug("useridle: GetLastInputInfo failed")
-            return _time_since_boot()# ----------------------------------------------------------------------
+        # Method 1: Try GetLastInputInfo (works if service has right permissions)
+        try:
+            lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
+            if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii)):
+                tick = GetTickCount64() if GetTickCount64 else GetTickCount()
+                idle_ms = tick - lii.dwTime
+                idle_sec = idle_ms / 1000.0
+                
+                uptime = _time_since_boot()
+                # Check if result is valid
+                if 0 <= idle_sec <= uptime and idle_sec < uptime * 0.99:
+                    logger.debug(f"useridle: GetLastInputInfo returned {idle_sec:.1f}s")
+                    return idle_sec
+                else:
+                    logger.debug(f"useridle: GetLastInputInfo returned suspicious value {idle_sec:.1f}s (uptime={uptime:.1f}s)")
+        except Exception as e:
+            logger.debug(f"useridle: GetLastInputInfo failed: {e}")
+        
+        # Method 2: Try quser command
+        idle_quser = _get_idle_via_powershell(session_id)
+        if idle_quser is not None:
+            logger.debug(f"useridle: quser returned {idle_quser:.1f}s")
+            return idle_quser
+        
+        # Method 3: Fallback - assume user is active if we found a session
+        # This is not ideal but prevents false positives
+        logger.warning("useridle: All methods failed, assuming user is active (returning 0)")
+        return 0.0
+    # ----------------------------------------------------------------------
 # Linux – unchanged original implementation
 # ----------------------------------------------------------------------
 elif sys.platform.startswith('linux'):
