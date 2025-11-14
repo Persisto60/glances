@@ -21,201 +21,55 @@ from glances.logger import logger
 
 
 # ----------------------------------------------------------------------
-# Windows – real user-idle detection (works when Glances runs as a service)
+# Windows – user-idle detection (file-based, works from service)
 # ----------------------------------------------------------------------
 if sys.platform.startswith('win'):
+    import os
     import ctypes
     from ctypes import wintypes
-    import subprocess
-    import json
-
-    # ---- Windows constants ------------------------------------------------
-    WTS_CURRENT_SERVER_HANDLE = 0
-    
-    # ---- WinAPI prototypes ------------------------------------------------
-    WTSEnumerateSessionsW = ctypes.windll.wtsapi32.WTSEnumerateSessionsW
-    WTSQuerySessionInformationW = ctypes.windll.wtsapi32.WTSQuerySessionInformationW
-    WTSFreeMemory = ctypes.windll.wtsapi32.WTSFreeMemory
-    GetTickCount64 = getattr(ctypes.windll.kernel32, 'GetTickCount64', None)
-    GetTickCount = ctypes.windll.kernel32.GetTickCount
-
-    # Connection states
-    WTSActive = 0
-
-    class WTS_SESSION_INFO(ctypes.Structure):
-        _fields_ = [
-            ('SessionId', wintypes.DWORD),
-            ('pWinStationName', wintypes.LPWSTR),
-            ('State', ctypes.c_int)
-        ]
-
-    class LASTINPUTINFO(ctypes.Structure):
-        _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
 
     # ------------------------------------------------------------------
-    def _time_since_boot() -> float:
-        """Seconds since the system booted."""
-        tick = GetTickCount64() if GetTickCount64 else GetTickCount()
+    # 1. Path to the marker file
+    # ------------------------------------------------------------------
+    IDLE_FILE = r"C:\Windows\Temp\CurrentIdleTime.txt"
+
+    # ------------------------------------------------------------------
+    # 2. Helper – seconds since the system booted
+    # ------------------------------------------------------------------
+    _GetTickCount64 = getattr(ctypes.windll.kernel32, 'GetTickCount64', None)
+    _GetTickCount   = ctypes.windll.kernel32.GetTickCount
+
+    def _uptime_seconds() -> float:
+        """Return system uptime in seconds (float)."""
+        tick = _GetTickCount64() if _GetTickCount64 else _GetTickCount()
         return tick / 1000.0
 
     # ------------------------------------------------------------------
-    def _get_active_console_session() -> int | None:
-        """Find the active console session ID."""
-        p_session_info = ctypes.POINTER(WTS_SESSION_INFO)()
-        count = wintypes.DWORD()
-        
-        if not WTSEnumerateSessionsW(
-            WTS_CURRENT_SERVER_HANDLE, 0, 1,
-            ctypes.byref(p_session_info),
-            ctypes.byref(count)
-        ):
-            return None
-        
-        try:
-            sessions = ctypes.cast(
-                p_session_info,
-                ctypes.POINTER(WTS_SESSION_INFO * count.value)
-            ).contents
-            
-            for session in sessions:
-                if session.State == WTSActive and session.SessionId > 0:
-                    logger.debug(f"useridle: Found active session {session.SessionId}")
-                    return session.SessionId
-        finally:
-            WTSFreeMemory(p_session_info)
-        
-        return None
-
+    # 3. Main idle-time function
     # ------------------------------------------------------------------
-    def _get_idle_via_powershell(session_id: int) -> float | None:
+    def _get_windows_idle_time() -> float:
         """
-        Use PowerShell to get idle time - works from service context.
-        This queries the user session using quser command.
-        """
-        try:
-            # Use quser to get session idle time
-            result = subprocess.run(
-                ['quser'],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            
-            if result.returncode != 0:
-                logger.debug(f"useridle: quser failed: {result.stderr}")
-                return None
-            
-            # Parse quser output
-            lines = result.stdout.strip().split('\n')
-            if len(lines) < 2:
-                return None
-            
-            for line in lines[1:]:  # Skip header
-                parts = line.split()
-                if len(parts) < 5:
-                    continue
-                
-                # Idle time is usually in column index 4 or 5
-                # Format can be ".", "0:01", "2:30", or "1+23:45"
-                idle_str = parts[4] if parts[1] != '>' else parts[5] if len(parts) > 5 else parts[4]
-                
-                if idle_str == '.' or idle_str.lower() == 'none':
-                    # Active (less than 1 minute idle)
-                    return 0.0
-                
-                # Parse idle time
-                if '+' in idle_str:
-                    # Format: "days+hours:minutes"
-                    days_part, time_part = idle_str.split('+')
-                    days = int(days_part)
-                    hours, minutes = map(int, time_part.split(':'))
-                    return days * 86400 + hours * 3600 + minutes * 60
-                elif ':' in idle_str:
-                    # Format: "hours:minutes" or "minutes:seconds"
-                    parts_time = idle_str.split(':')
-                    if len(parts_time) == 2:
-                        # Could be hours:minutes or minutes:seconds
-                        # quser typically shows minutes for < 1 hour
-                        val1, val2 = map(int, parts_time)
-                        if val1 < 24:  # Likely minutes:seconds or hours:minutes
-                            return val1 * 60 + val2
-                        else:
-                            return val1 * 3600 + val2 * 60
-                else:
-                    # Just a number (minutes)
-                    return int(idle_str) * 60
-                    
-        except Exception as e:
-            logger.debug(f"useridle: quser parsing failed: {e}")
-            return None
-        
-        return None
+        Return user-idle seconds.
 
-    # ------------------------------------------------------------------
-    def _get_windows_idle_time() -> float | None:
+        * If the marker file exists → read the integer inside it.
+        * Otherwise → return system uptime.
         """
-        Return user-idle seconds. Works when running as a Windows service.
-        Uses multiple fallback methods.
-        """
-        # Check if any user is logged in
-        session_id = _get_active_console_session()
-        
-        if session_id is None:
-            logger.debug("useridle: No active session")
-            return _time_since_boot()
-        
-        # Verify user is logged in
-        p_buffer = ctypes.c_void_p()
-        bytes_returned = wintypes.DWORD()
-        
-        if WTSQuerySessionInformationW(
-            WTS_CURRENT_SERVER_HANDLE, session_id, 5,  # WTSUserName
-            ctypes.byref(p_buffer), ctypes.byref(bytes_returned)
-        ):
+        # 1. Try to read the file
+        if os.path.isfile(IDLE_FILE):
             try:
-                username = ctypes.wstring_at(p_buffer)
-                WTSFreeMemory(p_buffer)
-                
-                if not username:
-                    logger.debug(f"useridle: Session {session_id} has no user")
-                    return _time_since_boot()
-                
-                logger.debug(f"useridle: Session {session_id} user: {username}")
-            except:
-                WTSFreeMemory(p_buffer)
-                return _time_since_boot()
-        else:
-            return _time_since_boot()
-        
-        # Method 1: Try GetLastInputInfo (works if service has right permissions)
-        try:
-            lii = LASTINPUTINFO(cbSize=ctypes.sizeof(LASTINPUTINFO))
-            if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii)):
-                tick = GetTickCount64() if GetTickCount64 else GetTickCount()
-                idle_ms = tick - lii.dwTime
-                idle_sec = idle_ms / 1000.0
-                
-                uptime = _time_since_boot()
-                # Check if result is valid
-                if 0 <= idle_sec <= uptime and idle_sec < uptime * 0.99:
-                    logger.debug(f"useridle: GetLastInputInfo returned {idle_sec:.1f}s")
-                    return idle_sec
-                else:
-                    logger.debug(f"useridle: GetLastInputInfo returned suspicious value {idle_sec:.1f}s (uptime={uptime:.1f}s)")
-        except Exception as e:
-            logger.debug(f"useridle: GetLastInputInfo failed: {e}")
-        
-        # Method 2: Try quser command
-        idle_quser = _get_idle_via_powershell(session_id)
-        if idle_quser is not None:
-            logger.debug(f"useridle: quser returned {idle_quser:.1f}s")
-            return idle_quser
-        
-        # Method 3: Fallback - assume user is active if we found a session
-        # This is not ideal but prevents false positives
-        logger.warning("useridle: All methods failed, assuming user is active (returning 0)")
-        return 0.0
+                with open(IDLE_FILE, 'r', encoding='ascii') as f:
+                    content = f.read().strip()
+                # The file contains only a decimal number (no newline)
+                idle_sec = int(content)
+                logger.debug(f"useridle: file {IDLE_FILE!r} → {idle_sec}s")
+                return float(idle_sec)
+            except Exception as exc:
+                logger.debug(f"useridle: failed to read {IDLE_FILE!r}: {exc}")
+
+        # 2. No file → no logged-in user → report uptime
+        uptime = _uptime_seconds()
+        logger.debug(f"useridle: no file → uptime {uptime:.1f}s")
+        return uptime
     # ----------------------------------------------------------------------
 # Linux – unchanged original implementation
 # ----------------------------------------------------------------------
